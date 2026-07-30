@@ -1,0 +1,55 @@
+# Data & Datasets (Prevent uploading large data files to GitHub)
+data/
+datasets/5.+Battery+Data+Set/
+datasets/11.+Randomized+Battery+Usage+Data+Set/
+datasets/**/*.zip
+datasets/**/*.mat
+datasets/**/*.csv
+datasets/**/*.h5
+datasets/**/*.pkl
+
+# Track datasets documentation
+!datasets/README.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Jupyter Notebook & IDEs
+.ipynb_checkpoints
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Model Checkpoints & Output Logs
+*.onnx
+*.pth
+*.pt
+*.ckpt
+logs/
+checkpoints/
