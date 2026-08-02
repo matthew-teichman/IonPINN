@@ -60,7 +60,7 @@ class SPMePhysics:
             3.0 * d2c_s_dr2, 
             d2c_s_dr2 + (2.0 / r_safe) * dc_s_dr
         )
-        loss_solid = dc_s_dt - self.D_s * spherical_term
+        loss_solid = dc_s_dt - spherical_term
 
         # =======================================================
         # EQUATION 2: Electrolyte Dynamics
@@ -84,9 +84,12 @@ class SPMePhysics:
         # (e.g., 10^16), which produces gradients that overflow float32 during backprop!
         eta = torch.clamp(eta, min=-0.5, max=0.5)
         
+        # Normalize eta by the thermal voltage (F / RT)
+        eta_norm = eta * (self.F / (self.R * self.T))
+        
         # Butler-Volmer equation
-        term_a = torch.exp((self.alpha_a * self.F) / (self.R * self.T) * eta)
-        term_c = torch.exp((-self.alpha_c * self.F) / (self.R * self.T) * eta)
+        term_a = torch.exp(self.alpha_a * eta_norm)
+        term_c = torch.exp(-self.alpha_c * eta_norm)
         
         loss_kinetics = j_Li - self.i_0 * (term_a - term_c)
 
@@ -128,7 +131,7 @@ class IonPINNNetwork(nn.Module):
         
         return self.fnn(final_state)
 
-def build_pinn_model():
+def build_pinn_model(large=False):
     """
     Builds the DeepXDE Model that combines the empirical data and the SPMe physics.
     """
@@ -148,13 +151,12 @@ def build_pinn_model():
         return on_boundary and np.isclose(x[1], 1)
         
     bc_l = dde.icbc.DirichletBC(geomtime, lambda x: 1.0, boundary_l, component=0)
-    ic = dde.icbc.IC(geomtime, lambda x: 0.5, lambda _, on_initial: on_initial, component=0)
     
     # We would add the experimental data from Dataset 5 & 11 as PointSetBC here
     data = dde.data.TimePDE(
         geomtime,
         spme.pde,
-        [bc_l, ic],
+        [bc_l],
         num_domain=1000,
         num_boundary=100,
         num_initial=100,
@@ -162,8 +164,21 @@ def build_pinn_model():
     )
     
     # Define DeepXDE Network (FNN)
-    # Shrunk from [64, 64, 64] down to [32, 32] and swapped Tanh for Swish (SiLU)
-    net = dde.nn.FNN([3] + [32, 32] + [5], "swish", "Glorot normal")
+    if large:
+        net = dde.nn.FNN([3] + [128, 128, 128, 128] + [5], "swish", "Glorot normal")
+    else:
+        # Shrunk from [64, 64, 64] down to [32, 32] and swapped Tanh for Swish (SiLU)
+        net = dde.nn.FNN([3] + [32, 32] + [5], "swish", "Glorot normal")
+    
+    def output_transform(inputs, outputs):
+        t = inputs[:, 0:1]
+        c_s = outputs[:, 0:1]
+        other_states = outputs[:, 1:]
+        # Hard enforce c_s = 0.5 at t=0
+        c_s_new = 0.5 + (1 - torch.exp(-t)) * c_s
+        return torch.cat([c_s_new, other_states], dim=1)
+        
+    net.apply_output_transform(output_transform)
     
     model = dde.Model(data, net)
     return model

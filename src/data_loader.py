@@ -109,7 +109,7 @@ class TransientDynamicsDataset(Dataset):
                torch.tensor(self.features[idx], dtype=torch.float32), \
                torch.tensor(self.targets[idx], dtype=torch.float32)
 
-def get_dataloaders(data_dir: str, batch_size: int = 32):
+def get_dataloaders(data_dir: str):
     # Setup paths for Training dataset
     train_dir = os.path.join(data_dir, "Training")
     
@@ -121,5 +121,5 @@ def get_dataloaders(data_dir: str, batch_size: int = 32):
         aging_dataset.features = np.random.randn(100, 3)
         aging_dataset.targets = np.random.randn(100)
     
-    aging_loader = DataLoader(aging_dataset, batch_size=batch_size, shuffle=True)
+    aging_loader = DataLoader(aging_dataset, batch_size=max(1, len(aging_dataset)), shuffle=True)
     return aging_loader

@@ -1,6 +1,7 @@
 import os
 import argparse
 import deepxde as dde
+dde.config.set_default_float("float64")
 import torch
 import logging
 import numpy as np
@@ -11,69 +12,138 @@ from src.data_loader import get_dataloaders
 
 from rich.logging import RichHandler
 from rich.console import Console
+from deepxde.callbacks import Callback
 
 FORMAT = "%(message)s"
 logging.basicConfig(level="INFO", format=FORMAT, datefmt="[%X]", handlers=[RichHandler()])
 logger = logging.getLogger("rich")
 console = Console()
 
-def train(epochs, batch_size, learning_rate, plot_loss):
+import builtins
+from contextlib import contextmanager
+
+@contextmanager
+def suppress_builtin_print():
+    """Temporarily replaces Python's built-in print to silence DeepXDE's hardcoded prints."""
+    original_print = builtins.print
+    def _dummy_print(*args, **kwargs):
+        pass
+    builtins.print = _dummy_print
+    try:
+        yield
+    finally:
+        builtins.print = original_print
+
+
+
+class RichLossCallback(Callback):
+    def __init__(self, display_every=1):
+        super().__init__()
+        self.display_every = display_every
+
+    def on_epoch_end(self):
+        step = self.model.train_state.step
+        if step % self.display_every == 0:
+            loss_train = self.model.train_state.loss_train
+            labels = ["PDE Solid", "PDE Elec", "Kinetics", "BC Left"]
+            # Formatting them beautifully
+            loss_str = " | ".join([f"[cyan]{lbl}:[/cyan] {val:.2e}" for lbl, val in zip(labels, loss_train)])
+            console.print(f"[bold yellow]Step {step}[/bold yellow] | {loss_str}")
+
+def train(epochs, learning_rate, plot_loss):
     console.rule("[bold blue]IonPINN Foundation PINN Training[/bold blue]")
     # 1. Detect Device
     device = get_device()
     
     # 2. Setup Data (Optional depending on how DeepXDE handles points vs DataLoaders)
     data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
-    aging_loader = get_dataloaders(data_dir=data_dir, batch_size=batch_size)
+    aging_loader = get_dataloaders(data_dir=data_dir)
     logger.info(f"Loaded aging dataset with {len(aging_loader.dataset)} cycles.")
     
-    # 3. Build PINN Model
-    model = build_pinn_model()
+    def train_model(model, name, cb):
+        loss_weights = [1.0, 1.0, 1e-4, 50.0]
+        model.compile("adam", lr=learning_rate, decay=("step", 2000, 0.4), loss_weights=loss_weights)
+        
+        logger.info(f"Starting DeepXDE PINN optimization (Stage 1: Adam) for {name} model...")
+        resampler = dde.callbacks.PDEPointResampler(period=2000)
+        
+        with console.status(f"[bold green]Training {name} model (Adam)...[/bold green]", spinner="dots"):
+            with suppress_builtin_print():
+                model.train(iterations=epochs, display_every=100, callbacks=[cb, resampler])
+                
+        logger.info(f"Starting DeepXDE PINN optimization (Stage 2: L-BFGS) for {name} model...")
+        dde.optimizers.set_LBFGS_options(ftol=1e-12, gtol=1e-12, maxiter=50000)
+        model.compile("L-BFGS", loss_weights=loss_weights)
+        with console.status(f"[bold green]Training {name} model (L-BFGS)...[/bold green]", spinner="dots"):
+            with suppress_builtin_print():
+                losshistory, train_state = model.train(display_every=100, callbacks=[cb])
+        
+        return losshistory
+
+    # 3. Build & Train Small Model
+    model_small = build_pinn_model(large=False)
+    cb_small = RichLossCallback(display_every=100)
+    history_small = train_model(model_small, "Small", cb_small)
     
-    # 4. Compile Model
-    # Using L-BFGS or Adam as standard in PINNs
-    model.compile("adam", lr=learning_rate)
+    # 4. Build & Train Large Model
+    model_large = build_pinn_model(large=True)
+    cb_large = RichLossCallback(display_every=100)
+    history_large = train_model(model_large, "Large", cb_large)
     
-    # 5. Train Model
-    logger.info("Starting DeepXDE PINN optimization...")
-    with console.status("[bold green]Training model...[/bold green]", spinner="dots"):
-        losshistory, train_state = model.train(iterations=epochs, display_every=1)
-    
-    # 6. Save PyTorch Model
-    save_path = os.path.join(os.path.dirname(__file__), "..", "ionpinn_foundation.pt")
-    # DeepXDE saves models in its own way, but we can extract the PyTorch module
-    torch.save(model.net.state_dict(), save_path)
-    console.print(f"[bold green]✔[/bold green] Training complete. Foundation model saved to [bold cyan]{save_path}[/bold cyan]")
+    # 6. Save PyTorch Models
+    save_path_small = os.path.join(os.path.dirname(__file__), "..", "ionpinn_foundation_small.pt")
+    save_path_large = os.path.join(os.path.dirname(__file__), "..", "ionpinn_foundation_large.pt")
+    torch.save(model_small.net.state_dict(), save_path_small)
+    torch.save(model_large.net.state_dict(), save_path_large)
+    console.print(f"[bold green]Success![/bold green] Training complete. Foundation models saved to [bold cyan]{save_path_small}[/bold cyan] and [bold cyan]{save_path_large}[/bold cyan]")
 
     # 7. Plot Loss if requested
     if plot_loss:
-        plt.figure(figsize=(10, 6))
-        # DeepXDE losses are typically arrays (one for each PDE/BC component). Summing for total loss.
-        train_loss = np.sum(np.array(losshistory.loss_train), axis=1)
-        plt.plot(losshistory.steps, train_loss, label="Total Train Loss")
-        
-        if hasattr(losshistory, "loss_test") and len(losshistory.loss_test) > 0:
-            test_loss = np.sum(np.array(losshistory.loss_test), axis=1)
-            plt.plot(losshistory.steps, test_loss, label="Total Test Loss")
+        labels = ["PDE Solid", "PDE Elec", "Kinetics", "BC Left"]
+        loss_train_small = np.array(history_small.loss_train)
+        has_test_small = hasattr(history_small, "loss_test") and len(history_small.loss_test) > 0
+        if has_test_small:
+            loss_test_small = np.array(history_small.loss_test)
             
-        plt.xlabel("Epochs")
-        plt.ylabel("Loss")
-        plt.title("Training Loss Over Time")
-        plt.yscale("log")
-        plt.legend()
-        plt.grid(True)
+        loss_train_large = np.array(history_large.loss_train)
+        has_test_large = hasattr(history_large, "loss_test") and len(history_large.loss_test) > 0
+        if has_test_large:
+            loss_test_large = np.array(history_large.loss_test)
+            
+        fig, axs = plt.subplots(4, 1, figsize=(10, 12), sharex=False)
+        
+        for i, label in enumerate(labels):
+            axs[i].plot(history_small.steps, loss_train_small[:, i], label="Train (Small)", color="blue")
+            if has_test_small:
+                axs[i].plot(history_small.steps, loss_test_small[:, i], label="Validation (Small)", color="lightblue", linestyle="--")
+                
+            axs[i].plot(history_large.steps, loss_train_large[:, i], label="Train (Large)", color="green")
+            if has_test_large:
+                axs[i].plot(history_large.steps, loss_test_large[:, i], label="Validation (Large)", color="lightgreen", linestyle="--")
+            
+            # Add horizontal dotted line for the target goal loss
+            axs[i].axhline(y=1e-4, color="red", linestyle=":", linewidth=2, label="Target Goal ($10^{-4}$)")
+            
+            axs[i].set_ylabel("Loss")
+            axs[i].set_yscale("log")
+            axs[i].set_title(label)
+            axs[i].legend()
+            axs[i].grid(True)
+            
+        axs[-1].set_xlabel("Epochs")
+        plt.tight_layout()
+        
         plot_path = os.path.join(os.path.dirname(__file__), "..", "loss_plot.png")
         plt.savefig(plot_path)
-        logger.info(f"Saved loss plot to {plot_path}")
+        console.print(f"[bold green]Success![/bold green] Saved detailed loss plot to [bold cyan]{plot_path}[/bold cyan]")
         plt.show()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train IonPINN Foundation Model")
-    parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs (iterations)")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
+    parser.add_argument("--epochs", type=int, default=10000, help="Number of training epochs (iterations)")
     parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate for the optimizer")
     parser.add_argument("--plot_loss", action="store_true", help="Plot the loss after training using matplotlib")
     
     args = parser.parse_args()
     
-    train(epochs=args.epochs, batch_size=args.batch_size, learning_rate=args.learning_rate, plot_loss=args.plot_loss)
+    train(epochs=args.epochs, learning_rate=args.learning_rate, plot_loss=args.plot_loss)
