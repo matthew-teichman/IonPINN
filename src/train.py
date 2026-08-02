@@ -50,7 +50,7 @@ class RichLossCallback(Callback):
             loss_str = " | ".join([f"[cyan]{lbl}:[/cyan] {val:.2e}" for lbl, val in zip(labels, loss_train)])
             console.print(f"[bold yellow]Step {step}[/bold yellow] | {loss_str}")
 
-def train(epochs, learning_rate, plot_loss):
+def train(epochs, learning_rate, plot_loss, skip_large):
     console.rule("[bold blue]IonPINN Foundation PINN Training[/bold blue]")
     # 1. Detect Device
     device = get_device()
@@ -60,7 +60,8 @@ def train(epochs, learning_rate, plot_loss):
     aging_loader = get_dataloaders(data_dir=data_dir)
     logger.info(f"Loaded aging dataset with {len(aging_loader.dataset)} cycles.")
     
-    def train_model(model, name, cb):
+    def train_model(model, spme, name, cb, use_causal=True):
+        spme.causal_training = use_causal
         loss_weights = [1.0, 1.0, 1e-4, 50.0]
         model.compile("adam", lr=learning_rate, decay=("step", 2000, 0.4), loss_weights=loss_weights)
         
@@ -72,7 +73,11 @@ def train(epochs, learning_rate, plot_loss):
                 model.train(iterations=epochs, display_every=100, callbacks=[cb, resampler])
                 
         logger.info(f"Starting DeepXDE PINN optimization (Stage 2: L-BFGS) for {name} model...")
-        dde.optimizers.set_LBFGS_options(ftol=1e-12, gtol=1e-12, maxiter=50000)
+        
+        # Disable causal training for L-BFGS to maintain a static loss landscape
+        spme.causal_training = False
+        
+        dde.optimizers.set_LBFGS_options(ftol=1e-12, gtol=1e-12, maxiter=100000)
         model.compile("L-BFGS", loss_weights=loss_weights)
         with console.status(f"[bold green]Training {name} model (L-BFGS)...[/bold green]", spinner="dots"):
             with suppress_builtin_print():
@@ -81,21 +86,26 @@ def train(epochs, learning_rate, plot_loss):
         return losshistory
 
     # 3. Build & Train Small Model
-    model_small = build_pinn_model(large=False)
+    model_small, spme_small = build_pinn_model(large=False)
     cb_small = RichLossCallback(display_every=100)
-    history_small = train_model(model_small, "Small", cb_small)
+    history_small = train_model(model_small, spme_small, "Small", cb_small, use_causal=True)
     
     # 4. Build & Train Large Model
-    model_large = build_pinn_model(large=True)
-    cb_large = RichLossCallback(display_every=100)
-    history_large = train_model(model_large, "Large", cb_large)
+    if not skip_large:
+        model_large, spme_large = build_pinn_model(large=True)
+        cb_large = RichLossCallback(display_every=100)
+        history_large = train_model(model_large, spme_large, "Large", cb_large, use_causal=False)
     
     # 6. Save PyTorch Models
     save_path_small = os.path.join(os.path.dirname(__file__), "..", "ionpinn_foundation_small.pt")
-    save_path_large = os.path.join(os.path.dirname(__file__), "..", "ionpinn_foundation_large.pt")
     torch.save(model_small.net.state_dict(), save_path_small)
-    torch.save(model_large.net.state_dict(), save_path_large)
-    console.print(f"[bold green]Success![/bold green] Training complete. Foundation models saved to [bold cyan]{save_path_small}[/bold cyan] and [bold cyan]{save_path_large}[/bold cyan]")
+    
+    if not skip_large:
+        save_path_large = os.path.join(os.path.dirname(__file__), "..", "ionpinn_foundation_large.pt")
+        torch.save(model_large.net.state_dict(), save_path_large)
+        console.print(f"[bold green]Success![/bold green] Training complete. Foundation models saved to [bold cyan]{save_path_small}[/bold cyan] and [bold cyan]{save_path_large}[/bold cyan]")
+    else:
+        console.print(f"[bold green]Success![/bold green] Training complete. Foundation model saved to [bold cyan]{save_path_small}[/bold cyan]")
 
     # 7. Plot Loss if requested
     if plot_loss:
@@ -105,10 +115,11 @@ def train(epochs, learning_rate, plot_loss):
         if has_test_small:
             loss_test_small = np.array(history_small.loss_test)
             
-        loss_train_large = np.array(history_large.loss_train)
-        has_test_large = hasattr(history_large, "loss_test") and len(history_large.loss_test) > 0
-        if has_test_large:
-            loss_test_large = np.array(history_large.loss_test)
+        if not skip_large:
+            loss_train_large = np.array(history_large.loss_train)
+            has_test_large = hasattr(history_large, "loss_test") and len(history_large.loss_test) > 0
+            if has_test_large:
+                loss_test_large = np.array(history_large.loss_test)
             
         fig, axs = plt.subplots(4, 1, figsize=(10, 12), sharex=False)
         
@@ -117,9 +128,10 @@ def train(epochs, learning_rate, plot_loss):
             if has_test_small:
                 axs[i].plot(history_small.steps, loss_test_small[:, i], label="Validation (Small)", color="lightblue", linestyle="--")
                 
-            axs[i].plot(history_large.steps, loss_train_large[:, i], label="Train (Large)", color="green")
-            if has_test_large:
-                axs[i].plot(history_large.steps, loss_test_large[:, i], label="Validation (Large)", color="lightgreen", linestyle="--")
+            if not skip_large:
+                axs[i].plot(history_large.steps, loss_train_large[:, i], label="Train (Large)", color="green")
+                if has_test_large:
+                    axs[i].plot(history_large.steps, loss_test_large[:, i], label="Validation (Large)", color="lightgreen", linestyle="--")
             
             # Add horizontal dotted line for the target goal loss
             axs[i].axhline(y=1e-4, color="red", linestyle=":", linewidth=2, label="Target Goal ($10^{-4}$)")
@@ -143,7 +155,8 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=10000, help="Number of training epochs (iterations)")
     parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate for the optimizer")
     parser.add_argument("--plot_loss", action="store_true", help="Plot the loss after training using matplotlib")
+    parser.add_argument("--skip_large", action="store_true", help="Skip training the large model")
     
     args = parser.parse_args()
     
-    train(epochs=args.epochs, learning_rate=args.learning_rate, plot_loss=args.plot_loss)
+    train(epochs=args.epochs, learning_rate=args.learning_rate, plot_loss=args.plot_loss, skip_large=args.skip_large)
