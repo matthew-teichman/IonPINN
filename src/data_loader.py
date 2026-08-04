@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
-from typing import Tuple, List
+from typing import Tuple
 
 class BatteryAgingDataset(Dataset):
     """
@@ -46,7 +46,7 @@ class BatteryAgingDataset(Dataset):
                 
                 features_list.append(feats)
                 targets_list.append(target)
-            except Exception as e:
+            except Exception:
                 pass
                 
         return np.array(features_list), np.array(targets_list)
@@ -96,7 +96,7 @@ class TransientDynamicsDataset(Dataset):
                 time_list.append(t)
                 features_list.append(feats)
                 targets_list.append(target)
-            except Exception as e:
+            except Exception:
                 pass
                 
         return np.array(time_list, dtype=object), np.array(features_list, dtype=object), np.array(targets_list, dtype=object)

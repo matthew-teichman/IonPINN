@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import deepxde as dde
 import numpy as np
 
@@ -98,57 +97,6 @@ class SPMePhysics:
         # =======================================================
         # DeepXDE will automatically enforce that all three of these equal 0
         return [loss_solid, loss_electrolyte, loss_kinetics]
-
-class IonPINNNetwork(nn.Module):
-    """
-    GRU Hybrid architecture for IonPINN.
-    Uses a small GRU to process time-series load data (Voltage, Current, Temperature).
-    The final hidden state is fed into a tiny FNN (with SiLU activation) to output the final PDE predictions.
-    """
-    def __init__(self, gru_in_dim=3, gru_hidden=32, fnn_hidden=32, out_dim=5):
-        super().__init__()
-        self.regularizer = None
-        # GRU for time-series data
-        self.gru = nn.GRU(input_size=gru_in_dim, hidden_size=gru_hidden, batch_first=True)
-        
-        # Tiny FNN/MLP with SiLU (Swish) activation
-        self.fnn = nn.Sequential(
-            nn.Linear(gru_hidden, fnn_hidden),
-            nn.SiLU(),
-            nn.Linear(fnn_hidden, fnn_hidden),
-            nn.SiLU(),
-            nn.Linear(fnn_hidden, out_dim)
-        )
-        self._transform = None # Placeholder for DeepXDE output transformations
-        
-        # Explicitly cast all weights to float64 to match DeepXDE's config
-        self.double()
-        
-    def forward(self, x):
-        inputs = x # Store original DeepXDE inputs for the output transform
-
-        # x is expected to have sequence dimension (batch, seq_len, gru_in_dim)
-        if x.dim() == 2:
-            x = x.unsqueeze(1)
-            
-        # Disable CuDNN temporarily to allow double backward (Hessian) for PINN physics
-        with torch.backends.cudnn.flags(enabled=False):
-            gru_out, _ = self.gru(x)
-        
-        # Extract the final hidden state
-        final_state = gru_out[:, -1, :]
-        
-        y = self.fnn(final_state)
-
-        # Apply the DeepXDE output transform if it has been defined
-        if self._transform is not None:
-            y = self._transform(inputs, y)
-
-        return y
-
-    def apply_output_transform(self, transform):
-        """Allows DeepXDE to inject the hard initial condition transform."""
-        self._transform = transform
 
 def build_pinn_model(large=False):
     """

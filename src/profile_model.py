@@ -1,5 +1,4 @@
-import torch
-import deepxde as dde
+
 from rich.console import Console
 from rich.table import Table
 import os

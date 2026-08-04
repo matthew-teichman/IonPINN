@@ -17,12 +17,6 @@ The goal of these strategies is to overcome severe gradient stiffness, loss plat
   * **Overpotential:** Normalized overpotential by thermal voltage: $\tilde{\eta} = \frac{F}{RT} \eta$[cite: 3].
 * **Impact:** Eliminates raw physical constants from the derivative multipliers, preventing exponential loss explosion in the Butler-Volmer kinetics equation[cite: 3].
 
-### 1.2 Hard Initial Conditions (Output Transformations)
-* **Problem:** Enforcing initial conditions ($c_s(r, x, 0) = 0.5$) via soft loss penalties caused the initial condition residual to flatline at $\sim 2.0$, forcing the network to waste capacity trying to learn $t=0$[cite: 3].
-* **Solution:** Structurally enforced hard initial conditions on $c_s$ using an output transformation[cite: 3]:
-  $$y_{\text{final}}(x, t) = y_0(x) + (1 - e^{-t}) \cdot \text{NN}(x, t)$$
-* **Targeting:** Applied **strictly to component 0 ($c_s$)**[cite: 3]. Unconstrained algebraic states ($\phi_s, \phi_e, j_{\text{Li}}$) were left free to allow Butler-Volmer kinetics to self-balance at $t=0$ without creating mathematical contradictions[cite: 3].
-
 ---
 
 ## 2. Loss Landscape & Optimization Engineering
@@ -53,18 +47,6 @@ The goal of these strategies is to overcome severe gradient stiffness, loss plat
 * **Mechanism:** Dynamically redistributes spatial collocation points every 2,000 steps during the Adam phase to focus density on high-residual regions (e.g., steep concentration gradients at the particle boundary $r = R_s$)[cite: 3].
 * **Constraint:** Disabled prior to Stage 2 (L-BFGS) to maintain a static loss landscape for second-order gradient calculation[cite: 3].
 
-### 3.2 Continuous Causal Training (Time-Marching)
-* **Problem:** Evaluating all time steps $t \in [0, 1]$ simultaneously causes future state errors ($t=0.9$) to backpropagate and corrupt early gradients ($t=0.1$), locking `PDE Solid` loss at $10^{-1}$[cite: 3].
-* **Solution:** Weighted temporal residuals sequentially[cite: 3]:
-  $$w_i = \exp\left(-\epsilon \sum_{k=1}^{i-1} \mathcal{L}_k\right)$$
-* **Behavior:** Mathematically forces the network to master early time steps ($t \to 0$) before allowing future states to influence gradient updates[cite: 3]. Causal weighting is active during Adam and disabled right before L-BFGS handoff[cite: 3].
-
-### 3.3 Causal Loss Numerical Stability
-* **Problem:** Differentiating through the exponential causal weighting function causes catastrophic gradient explosion ($10^{14}$), while large cumulative losses trigger floating-point underflow ($10^{-274}$), effectively destroying the training graph.
-* **Solution:**
-  * Wrapped the cumulative loss calculations strictly within `torch.no_grad()` to detach it from the AutoDiff computational graph.
-  * Normalized the cumulative loss sum to a $[0, 1]$ range.
-  * Clamped the final exponential weights strictly between $10^{-8}$ and $1.0$ to prevent machine-zero underflow.
 
 ---
 
@@ -74,10 +56,5 @@ To validate model efficiency for embedded microcontroller deployment, two archit
 
 | Parameter / Feature | Embedded Model (Target) | Large Baseline Model |
 | :--- | :--- | :--- |
-| **Architecture** | Custom GRU Hybrid (`gru_hidden=32`) | Scaled GRU Hybrid (`gru_hidden=128`) |
-| **Causal Training** | **Enabled** (Adam Phase) | **Disabled** (Strict Baseline) |
-| **Hard IC Transform** | Applied ($c_s$ only)[cite: 3] | Applied ($c_s$ only) |
-| **Primary Metric** | Residual Accuracy ($\le 10^{-4}$) vs. Memory/MAC Footprint[cite: 3] | Theoretical Loss Floor & Parameter Capacity Test |
-
-### 4.1 Strict Baseline Integrity
-The benchmark specifically toggles Causal Training **off** for the Large Baseline model while maintaining identical temporal inductive biases (the GRU). This isolates the effectiveness of the causal physics constraints against brute-force parameter scaling, proving that gradient pathology—not a lack of network capacity—causes standard architectures to plateau.
+| **Architecture** | FNN [3, 32, 32, 5] | FNN [3, 128, 128, 128, 128, 5] |
+| **Primary Metric** | Residual Accuracy ($\le 10^{-4}$) vs. Memory/MAC Footprint[cite: 3] | Theoretical Loss Floor & Parameter Capacity Test |

@@ -111,7 +111,7 @@ def train(epochs, learning_rate, plot_loss, skip_large):
         cb_lbfgs = RichLossCallback(display_every=100)
         with console.status(f"[bold green]Training {name} model (L-BFGS)...[/bold green]", spinner="dots"):
             with suppress_builtin_print():
-                losshistory, train_state = model.train(display_every=100, callbacks=[cb_lbfgs])
+                losshistory, _ = model.train(display_every=100, callbacks=[cb_lbfgs])
 
         return losshistory
 

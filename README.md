@@ -24,7 +24,7 @@ Ensure you have Poetry installed. From the root directory, run:
 ```bash
 poetry install
 ```
-This will automatically set up a virtual environment and install all required packages (including PyTorch, DeepXDE, Pandas, and ONNX Runtime). It will detect if you have an NVIDIA GPU and install CUDA-compatible Torch binaries where applicable.
+This will automatically set up a virtual environment and install all required packages (including PyTorch, DeepXDE, Rich, Matplotlib, Pandas, and ONNX Runtime). It will detect if you have an NVIDIA GPU and install CUDA-compatible Torch binaries where applicable.
 
 ### 2. Run the Training Pipeline
 To train the Foundation PINN on the Dataset 5 (aging) and Dataset 11 (transient) CSVs, run:
@@ -54,4 +54,10 @@ This script will produce `ionpinn_foundation.onnx` in the root folder, equipped 
 You can evaluate the trained model's performance on aging datasets using the `evaluate_metrics.py` script. This script loads the saved weights, calculates Pack-Level SoC, SoH, and RUL across multiple cycles, and outputs a live `rich` terminal dashboard alongside a generated Matplotlib degradation report (`evaluation_report.png`).
 ```bash
 poetry run python src/evaluate_metrics.py
+```
+
+### 5. Profile Model
+You can profile the model's memory footprint and FLOPs for edge embedded deployment using the `profile_model.py` script.
+```bash
+poetry run python src/profile_model.py
 ```

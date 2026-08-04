@@ -57,7 +57,7 @@ def main():
     console = Console()
     device = get_device()
     
-    model, spme = build_pinn_model(large=False)
+    model, _ = build_pinn_model(large=False)
     
     weights_path = "ionpinn_foundation_small.pt"
     if os.path.exists(weights_path):
