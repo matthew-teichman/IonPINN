@@ -29,24 +29,29 @@ This will automatically set up a virtual environment and install all required pa
 ### 2. Run the Training Pipeline
 To train the Foundation PINN on the Dataset 5 (aging) and Dataset 11 (transient) CSVs, run:
 ```bash
-poetry run python -m src.train
+poetry run python -m src/train.py
 ```
 
 You can customize the training process with several command-line arguments:
-*   `--epochs`: Number of training iterations (default: 100)
-*   `--batch_size`: Batch size for training (default: 32)
+*   `--epochs`: Number of training iterations (default: 40000)
 *   `--learning_rate`: Learning rate for the optimizer (default: 1e-3)
 *   `--plot_loss`: Add this flag to plot the training and test loss using `matplotlib` when training is complete
 
 For example, to train for 500 epochs with a custom learning rate and plot the results:
 ```bash
-poetry run python -m src.train --epochs 500 --batch_size 64 --learning_rate 0.005 --plot_loss
+poetry run python -m src.train --epochs 20000 --learning_rate 0.005 --plot_loss
 ```
 *Note: The script dynamically checks for a GPU and prints out whether it's using CUDA or falling back to the CPU.*
 
 ### 3. Export to ONNX
 Once the model is trained (and weights saved as `.pt`), you can export it for embedded usage:
 ```bash
-poetry run python -m src.export
+poetry run python -m src/export.py
 ```
 This script will produce `ionpinn_foundation.onnx` in the root folder, equipped with dynamic batching properties ready for edge deployment.
+
+### 4. Evaluate Metrics
+You can evaluate the trained model's performance on aging datasets using the `evaluate_metrics.py` script. This script loads the saved weights, calculates Pack-Level SoC, SoH, and RUL across multiple cycles, and outputs a live `rich` terminal dashboard alongside a generated Matplotlib degradation report (`evaluation_report.png`).
+```bash
+poetry run python src/evaluate_metrics.py
+```

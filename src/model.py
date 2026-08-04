@@ -21,11 +21,6 @@ class SPMePhysics:
         self.R = 8.314
         self.T = 298.15
         self.i_0 = 1.0
-        
-        # Causal PINNs configuration
-        self.causal_training = True
-        self.epsilon = 100.0
-        self.n_bins = 100
 
     def U_ocp(self, c_s):
         # Placeholder for Open Circuit Potential lookup or function
@@ -99,52 +94,6 @@ class SPMePhysics:
         loss_kinetics = j_Li - self.i_0 * (term_a - term_c)
 
         # =======================================================
-        # Continuous Causal Training (Causal PINNs)
-        # =======================================================
-        # Bypass causal weighting for the validation set (which has exactly 500 points)
-        # to ensure the validation metrics reflect the true, unweighted physics error.
-        is_test_set = x.shape[0] == 500
-        
-        if self.causal_training and not is_test_set:
-            with torch.no_grad():
-                t_flat = t.squeeze(1)
-                # Determine bin index for each point (clamped to prevent out-of-bounds)
-                bin_idx = torch.clamp((t_flat * self.n_bins).long(), 0, self.n_bins - 1)
-                
-                # Raw spatial residuals at current evaluation
-                L_raw = torch.abs(loss_solid.squeeze(1)) + torch.abs(loss_electrolyte.squeeze(1))
-                
-                # Sum of residuals in each bin
-                bin_loss = torch.zeros(self.n_bins, device=x.device, dtype=x.dtype)
-                bin_loss.scatter_add_(0, bin_idx, L_raw)
-                
-                # Count points per bin to get spatial mean
-                bin_count = torch.zeros(self.n_bins, device=x.device, dtype=x.dtype)
-                bin_count.scatter_add_(0, bin_idx, torch.ones_like(t_flat))
-                
-                # Mean residual per bin
-                bin_mean_loss = torch.where(bin_count > 0, bin_loss / bin_count, torch.zeros_like(bin_loss))
-                
-                # Cumulative sum of past errors (shifted by 1)
-                cumsum_loss = torch.cumsum(bin_mean_loss, dim=0)
-                shifted_cumsum = torch.cat([torch.tensor([0.0], device=x.device, dtype=x.dtype), cumsum_loss[:-1]])
-
-                # FIX: Normalize the cumulative loss to a [0, 1] range to prevent exponential blowup
-                max_cumsum = torch.max(shifted_cumsum) + 1e-8
-                normalized_cumsum = shifted_cumsum / max_cumsum
-
-                # FIX: Calculate causal weights and strictly clamp them to prevent 0.0 underflow
-                W_bin = torch.exp(-self.epsilon * normalized_cumsum)
-                W_bin = torch.clamp(W_bin, min=1e-8, max=1.0)
-                
-                # Map bin weights back to individual points
-                W_point = W_bin[bin_idx].unsqueeze(1)
-                
-            # Apply causal weights to the temporal PDEs
-            loss_solid = loss_solid * W_point
-            loss_electrolyte = loss_electrolyte * W_point
-
-        # =======================================================
         # Return all coupled physics constraints
         # =======================================================
         # DeepXDE will automatically enforce that all three of these equal 0
@@ -158,6 +107,7 @@ class IonPINNNetwork(nn.Module):
     """
     def __init__(self, gru_in_dim=3, gru_hidden=32, fnn_hidden=32, out_dim=5):
         super().__init__()
+        self.regularizer = None
         # GRU for time-series data
         self.gru = nn.GRU(input_size=gru_in_dim, hidden_size=gru_hidden, batch_first=True)
         
@@ -171,6 +121,9 @@ class IonPINNNetwork(nn.Module):
         )
         self._transform = None # Placeholder for DeepXDE output transformations
         
+        # Explicitly cast all weights to float64 to match DeepXDE's config
+        self.double()
+        
     def forward(self, x):
         inputs = x # Store original DeepXDE inputs for the output transform
 
@@ -178,7 +131,9 @@ class IonPINNNetwork(nn.Module):
         if x.dim() == 2:
             x = x.unsqueeze(1)
             
-        gru_out, _ = self.gru(x)
+        # Disable CuDNN temporarily to allow double backward (Hessian) for PINN physics
+        with torch.backends.cudnn.flags(enabled=False):
+            gru_out, _ = self.gru(x)
         
         # Extract the final hidden state
         final_state = gru_out[:, -1, :]
@@ -216,11 +171,14 @@ def build_pinn_model(large=False):
         
     bc_l = dde.icbc.DirichletBC(geomtime, lambda x: 1.0, boundary_l, component=0)
     
+    # NEW: Soft Initial Condition requiring c_s to start at 0.5
+    ic_c_s = dde.icbc.IC(geomtime, lambda x: 0.5, lambda _, on_initial: on_initial, component=0)
+    
     # We would add the experimental data from Dataset 5 & 11 as PointSetBC here
     data = dde.data.TimePDE(
         geomtime,
         spme.pde,
-        [bc_l],
+        [bc_l, ic_c_s],
         num_domain=1000,
         num_boundary=100,
         num_initial=100,
@@ -232,17 +190,7 @@ def build_pinn_model(large=False):
         net = dde.nn.FNN([3] + [128, 128, 128, 128] + [5], "swish", "Glorot normal")
     else:
         # Shrunk from [64, 64, 64] down to [32, 32] and swapped Tanh for Swish (SiLU)
-        net = IonPINNNetwork(gru_in_dim=3, gru_hidden=32, fnn_hidden=32, out_dim=5)
-    
-    def output_transform(inputs, outputs):
-        t = inputs[:, 0:1]
-        c_s = outputs[:, 0:1]
-        other_states = outputs[:, 1:]
-        # Hard enforce c_s = 0.5 at t=0
-        c_s_new = 0.5 + (1 - torch.exp(-t)) * c_s
-        return torch.cat([c_s_new, other_states], dim=1)
-        
-    net.apply_output_transform(output_transform)
+        net = dde.nn.FNN([3] + [32, 32] + [5], "swish", "Glorot normal")
     
     model = dde.Model(data, net)
     return model, spme
