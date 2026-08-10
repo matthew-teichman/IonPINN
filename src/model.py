@@ -18,7 +18,6 @@ class SPMePhysics:
         self.alpha_a = 0.5
         self.alpha_c = 0.5
         self.R = 8.314
-        self.T = 298.15
         self.i_0 = 1.0
 
     def U_ocp(self, c_s):
@@ -38,10 +37,11 @@ class SPMePhysics:
         phi_e = y[:, 3:4] # Electrolyte potential
         j_Li = y[:, 4:5]  # Interfacial current density
 
-        # Extract coordinates
-        t = x[:, 0:1]
-        r = x[:, 1:2]       # Microscale: inside the particle
-        x_cell = x[:, 2:3]  # Macroscale: across the electrode
+        # Extract coordinates from DeepXDE's [r, x_cell, T, t] format
+        r = x[:, 0:1]       # Microscale: inside the particle
+        x_cell = x[:, 1:2]  # Macroscale: across the electrode
+        T_kelvin = x[:, 2:3] + 273.15 # Temperature (convert Celsius to Kelvin)
+        t = x[:, 3:4]       # Time
 
         # =======================================================
         # EQUATION 1: Solid-Phase Diffusion (Fick's Law)
@@ -83,8 +83,10 @@ class SPMePhysics:
         # (e.g., 10^16), which produces gradients that overflow float32 during backprop!
         eta = torch.clamp(eta, min=-0.5, max=0.5)
         
+        # Temperature already extracted above
+        
         # Normalize eta by the thermal voltage (F / RT)
-        eta_norm = eta * (self.F / (self.R * self.T))
+        eta_norm = eta * (self.F / (self.R * T_kelvin))
         
         # Butler-Volmer equation
         term_a = torch.exp(self.alpha_a * eta_norm)
@@ -98,47 +100,53 @@ class SPMePhysics:
         # DeepXDE will automatically enforce that all three of these equal 0
         return [loss_solid, loss_electrolyte, loss_kinetics]
 
-def build_pinn_model(large=False):
+def build_pinn_model(X_train=None, Y_train=None, large=False):
     """
     Builds the DeepXDE Model that combines the empirical data and the SPMe physics.
     """
     # 1. Define Geometry and Time domain
-    geom = dde.geometry.Hypercube([0, 0], [1, 1]) # Spatial domain normalized [r, x_cell]
+    geom = dde.geometry.Hypercube([0, 0, 0], [1, 1, 100]) # Spatial domain [r, x_cell, T_celsius]
     timedomain = dde.geometry.TimeDomain(0, 1) # Normalized time
     geomtime = dde.geometry.GeometryXTime(geom, timedomain)
     
     # 2. Define Physics
     spme = SPMePhysics()
     
-    # Boundary and Initial Conditions (Placeholders for foundation model)
+    # Boundary and Initial Conditions
     def boundary_l(x, on_boundary):
         return on_boundary and np.isclose(x[1], 0)
         
-    def boundary_r(x, on_boundary):
-        return on_boundary and np.isclose(x[1], 1)
-        
     bc_l = dde.icbc.DirichletBC(geomtime, lambda x: 1.0, boundary_l, component=0)
     
-    # NEW: Soft Initial Condition requiring c_s to start at 0.5
+    # Soft Initial Condition requiring c_s to start at 0.5
     ic_c_s = dde.icbc.IC(geomtime, lambda x: 0.5, lambda _, on_initial: on_initial, component=0)
     
-    # We would add the experimental data from Dataset 5 & 11 as PointSetBC here
+    bcs = [bc_l, ic_c_s]
+    
+    # Add Experimental Data (Voltage)
+    if X_train is not None and Y_train is not None:
+        def voltage_op(inputs, outputs, X):
+            # outputs are [c_s, c_e, phi_s, phi_e, j_Li]
+            return outputs[:, 2:3] - outputs[:, 3:4]
+            
+        bc_voltage = dde.icbc.PointSetOperatorBC(X_train, Y_train, voltage_op)
+        bcs.append(bc_voltage)
+    
     data = dde.data.TimePDE(
         geomtime,
         spme.pde,
-        [bc_l, ic_c_s],
+        bcs,
         num_domain=1000,
         num_boundary=100,
         num_initial=100,
-        num_test=500  # Added to compute and display test metrics
+        num_test=500
     )
     
     # Define DeepXDE Network (FNN)
     if large:
-        net = dde.nn.FNN([3] + [128, 128, 128, 128] + [5], "swish", "Glorot normal")
+        net = dde.nn.FNN([4] + [128, 128, 128, 128] + [5], "swish", "Glorot normal")
     else:
-        # Shrunk from [64, 64, 64] down to [32, 32] and swapped Tanh for Swish (SiLU)
-        net = dde.nn.FNN([3] + [32, 32] + [5], "swish", "Glorot normal")
+        net = dde.nn.FNN([4] + [32, 32] + [5], "swish", "Glorot normal")
     
     model = dde.Model(data, net)
     return model, spme

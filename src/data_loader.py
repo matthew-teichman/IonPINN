@@ -123,3 +123,68 @@ def get_dataloaders(data_dir: str):
     
     aging_loader = DataLoader(aging_dataset, batch_size=max(1, len(aging_dataset)), shuffle=True)
     return aging_loader
+
+def get_pinn_training_data(data_dir: str, num_samples: int = 1000, dataset_prefix: str = "B0005"):
+    """
+    Loads raw CSV data and formats it for DeepXDE PointSetOperatorBC.
+    Returns: X_train (shape: [N, 4]), Y_train (shape: [N, 1])
+             where X_train is [t_norm, r, x_cell, T_celsius]
+             and Y_train is [Voltage]
+    """
+    import glob
+    
+    # Try Training dir first, fallback to Testing if empty
+    train_dir = os.path.join(data_dir, "Training")
+    if not os.path.exists(train_dir) or not glob.glob(os.path.join(train_dir, f"{dataset_prefix}_cycle*.csv")):
+        train_dir = os.path.join(data_dir, "Testing")
+        
+    files = glob.glob(os.path.join(train_dir, f"{dataset_prefix}_cycle*.csv"))
+    if not files:
+        return None, None
+        
+    files.sort()
+    
+    # Select a subset of files to train on (e.g. 5 evenly spaced cycles)
+    num_files = min(5, len(files))
+    indices = np.linspace(0, len(files) - 1, num_files, dtype=int)
+    selected_files = [files[i] for i in indices]
+    
+    X_list = []
+    Y_list = []
+    
+    for f in selected_files:
+        df = pd.read_csv(f)
+        if df.empty or 'Time' not in df.columns or 'Voltage' not in df.columns or 'Temperature' not in df.columns:
+            continue
+            
+        time_vals = df['Time'].values
+        voltage_vals = df['Voltage'].values
+        temp_vals = df['Temperature'].values
+        
+        # Normalize time
+        t_max = np.max(time_vals) if np.max(time_vals) > 0 else 1.0
+        t_norm = time_vals / t_max
+        
+        # We assume r=0.5 and x_cell=0.5 for the bulk macroscopic voltage measurement
+        r_vals = np.ones_like(t_norm) * 0.5
+        x_cell_vals = np.ones_like(t_norm) * 0.5
+        
+        X = np.column_stack((r_vals, x_cell_vals, temp_vals, t_norm))
+        Y = voltage_vals.reshape(-1, 1)
+        
+        X_list.append(X)
+        Y_list.append(Y)
+        
+    if not X_list:
+        return None, None
+        
+    X_train = np.vstack(X_list)
+    Y_train = np.vstack(Y_list)
+    
+    # Randomly subsample to `num_samples` points to avoid overloading DeepXDE memory
+    if len(X_train) > num_samples:
+        idx = np.random.choice(len(X_train), num_samples, replace=False)
+        X_train = X_train[idx]
+        Y_train = Y_train[idx]
+        
+    return X_train, Y_train

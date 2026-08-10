@@ -9,7 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from src.utils import get_device
 from src.model import build_pinn_model
-from src.data_loader import get_dataloaders
+from src.data_loader import get_pinn_training_data
 
 import builtins
 from contextlib import contextmanager
@@ -52,7 +52,8 @@ def suppress_builtin_print():
                 # Parse the bracketed string for train losses
                 loss_str_part = msg[msg.find("[")+1:msg.find("]")]
                 losses = [float(x.strip()) for x in loss_str_part.split(",")]
-                labels = ["PDE Solid", "PDE Elec", "Kinetics", "BC Left", "IC c_s"]
+                labels = ["PDE Solid", "PDE Elec", "Kinetics", "BC Left", "IC c_s", "Voltage Data"]
+                # Only zip up to the number of available labels/losses
                 rich_str = " | ".join([f"[cyan]{lbl}:[/cyan] {val:.2e}" for lbl, val in zip(labels, losses)])
                 console.print(f"[bold yellow]Step {step}[/bold yellow] | {rich_str}")
             except Exception:
@@ -75,7 +76,7 @@ class RichLossCallback(Callback):
         step = self.model.train_state.step
         if step % self.display_every == 0:
             loss_train = self.model.train_state.loss_train
-            labels = ["PDE Solid", "PDE Elec", "Kinetics", "BC Left", "IC c_s"]
+            labels = ["PDE Solid", "PDE Elec", "Kinetics", "BC Left", "IC c_s", "Voltage Data"]
             # Formatting them beautifully
             loss_str = " | ".join([f"[cyan]{lbl}:[/cyan] {val:.2e}" for lbl, val in zip(labels, loss_train)])
             console.print(f"[bold yellow]Step {step}[/bold yellow] | {loss_str}")
@@ -85,14 +86,17 @@ def train(epochs, learning_rate, plot_loss, skip_large):
     # 1. Detect Device
     device = get_device()
 
-    # 2. Setup Data (Optional depending on how DeepXDE handles points vs DataLoaders)
+    # 2. Setup Data
     data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
-    aging_loader = get_dataloaders(data_dir=data_dir)
-    logger.info(f"Loaded aging dataset with {len(aging_loader.dataset)} cycles.")
+    X_train, Y_train = get_pinn_training_data(data_dir=data_dir)
+    logger.info(f"Loaded empirical training data with {len(X_train)} points." if X_train is not None else "No empirical data loaded.")
 
     def train_model(model, spme, name, cb):
-        # 5 Weights: [PDE Solid, PDE Elec, Kinetics, BC Left, IC c_s]
+        # Weights: [PDE Solid, PDE Elec, Kinetics, BC Left, IC c_s, Voltage Data (if present)]
+        num_losses = len(model.data.bcs) + 3 # 3 PDEs + BCs
         loss_weights = [1.0, 1.0, 1e-4, 50.0, 50.0]
+        if num_losses > 5:
+            loss_weights.append(100.0) # High weight for actual voltage data
         model.compile("adam", lr=learning_rate, decay=("step", 2000, 0.4), loss_weights=loss_weights)
 
         logger.info(f"Starting DeepXDE PINN optimization (Stage 1: Adam) for {name} model...")
@@ -104,7 +108,8 @@ def train(epochs, learning_rate, plot_loss, skip_large):
 
         logger.info(f"Starting DeepXDE PINN optimization (Stage 2: L-BFGS) for {name} model...")
 
-        dde.optimizers.set_LBFGS_options(ftol=1e-12, gtol=1e-12, maxiter=120000)
+        # Reduce maxiter and maxcor to prevent CUDA Out Of Memory / Unknown Error on 4GB GPUs
+        dde.optimizers.set_LBFGS_options(ftol=1e-12, gtol=1e-12, maxiter=100000, maxcor=50)
         model.compile("L-BFGS", loss_weights=loss_weights)
 
         # Increase print frequency for L-BFGS because it is very slow per iteration
@@ -116,13 +121,13 @@ def train(epochs, learning_rate, plot_loss, skip_large):
         return losshistory
 
     # 3. Build & Train Small Model
-    model_small, spme_small = build_pinn_model(large=False)
+    model_small, spme_small = build_pinn_model(X_train, Y_train, large=False)
     cb_small = RichLossCallback(display_every=100)
     history_small = train_model(model_small, spme_small, "Small", cb_small)
 
     # 4. Build & Train Large Model
     if not skip_large:
-        model_large, spme_large = build_pinn_model(large=True)
+        model_large, spme_large = build_pinn_model(X_train, Y_train, large=True)
         cb_large = RichLossCallback(display_every=100)
         history_large = train_model(model_large, spme_large, "Large", cb_large)
 
@@ -139,7 +144,7 @@ def train(epochs, learning_rate, plot_loss, skip_large):
 
     # 7. Plot Loss if requested
     if plot_loss:
-        labels = ["PDE Solid", "PDE Elec", "Kinetics", "BC Left", "IC c_s"]
+        labels = ["PDE Solid", "PDE Elec", "Kinetics", "BC Left", "IC c_s", "Voltage Data"]
         loss_train_small = np.array(history_small.loss_train)
         has_test_small = hasattr(history_small, "loss_test") and len(history_small.loss_test) > 0
         if has_test_small:
@@ -151,7 +156,8 @@ def train(epochs, learning_rate, plot_loss, skip_large):
             if has_test_large:
                 loss_test_large = np.array(history_large.loss_test)
 
-        fig, axs = plt.subplots(5, 1, figsize=(10, 15), sharex=False)
+        num_plots = len(labels)
+        fig, axs = plt.subplots(num_plots, 1, figsize=(10, 3 * num_plots), sharex=False)
 
         for i, label in enumerate(labels):
             axs[i].plot(history_small.steps, loss_train_small[:, i], label="Train (Small)", color="blue")
