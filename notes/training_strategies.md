@@ -57,4 +57,25 @@ To validate model efficiency for embedded microcontroller deployment, two archit
 | Parameter / Feature | Embedded Model (Target) | Large Baseline Model |
 | :--- | :--- | :--- |
 | **Architecture** | FNN [3, 32, 32, 5] | FNN [3, 128, 128, 128, 128, 5] |
-| **Primary Metric** | Residual Accuracy ($\le 10^{-4}$) vs. Memory/MAC Footprint[cite: 3] | Theoretical Loss Floor & Parameter Capacity Test |
+| **Primary Metric** | Residual Accuracy ($\le 10^{-4}$) vs. Memory/MAC Footprint[cite: 3] | Theoretical Loss Floor & Parameter Capacity Test |
+
+---
+
+## 5. Capacity Enhancement Strategies (Small Model)
+
+To bridge the performance gap between large parameter-heavy baselines and embedded-target networks, specific techniques are employed to increase parameter efficiency without increasing MACs significantly:
+
+### 5.1 Fourier Feature Encoding (Input Transform)
+* **Problem:** Small fully-connected networks suffer from spectral bias and struggle to learn sharp, high-frequency physical dynamics, leading to large residual errors.
+* **Solution:** Input coordinates $x = [r, x_{cell}, T, t]$ are mapped into a higher-dimensional space using sinusoidal functions before entering the network: $\hat{x} = [x, \sin(\pi x), \cos(\pi x)]$.
+* **Impact:** Drastically improves the expressiveness of the model, enabling the $[32, 32]$ architecture to capture non-linear PDE manifolds.
+
+### 5.2 Hard-Constrained Boundary / Initial Conditions
+* **Problem:** Enforcing initial conditions (e.g., $c_s = 0.5$ at $t=0$) via soft loss penalties (e.g., `IC c_s` with weight `50.0`) consumes valuable capacity in small networks and creates conflicting gradients.
+* **Solution:** Apply an output transform to the network that mathematically forces the condition to hold true by definition. For example, $c_s(t) = 0.5 + t \cdot \text{NN}_0(x,t)$. 
+* **Impact:** Eliminates the IC loss term entirely, removing gradient conflicts and freeing up the network's capacity to focus exclusively on resolving the PDEs.
+
+### 5.3 Knowledge Distillation (Teacher-Student Transfer Learning)
+* **Problem:** Even with architectural enhancements, discovering the complex loss manifold representing coupled electrochemical PDEs is exceedingly difficult for a small network from scratch.
+* **Solution:** Train the overparameterized baseline model (Teacher) first. Then, sample a dense synthetic dataset of collocation points (e.g., 20,000 points) and evaluate them using the Teacher to produce continuous, high-fidelity state targets. The embedded model (Student) is then trained to minimize the MSE between its predictions and the Teacher's synthetic dataset (via `PointSetBC`), alongside the standard PDE residuals.
+* **Impact:** The Teacher "smooths" the highly-coupled, noisy PDE physics into a direct data-fitting objective for the Student. The Student can easily regress to the smooth Teacher manifold, achieving convergence and accuracy that it could never attain by solving the raw PDEs alone.

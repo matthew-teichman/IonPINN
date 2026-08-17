@@ -100,7 +100,7 @@ class SPMePhysics:
         # DeepXDE will automatically enforce that all three of these equal 0
         return [loss_solid, loss_electrolyte, loss_kinetics]
 
-def build_pinn_model(X_train=None, Y_train=None, large=False):
+def build_pinn_model(X_train=None, Y_train=None, large=False, extra_bcs=None):
     """
     Builds the DeepXDE Model that combines the empirical data and the SPMe physics.
     """
@@ -118,10 +118,12 @@ def build_pinn_model(X_train=None, Y_train=None, large=False):
         
     bc_l = dde.icbc.DirichletBC(geomtime, lambda x: 1.0, boundary_l, component=0)
     
-    # Soft Initial Condition requiring c_s to start at 0.5
-    ic_c_s = dde.icbc.IC(geomtime, lambda x: 0.5, lambda _, on_initial: on_initial, component=0)
+    # We hard-constrain the IC via output transform for both models,
+    # so we don't include it in the soft loss constraints.
+    bcs = [bc_l]
     
-    bcs = [bc_l, ic_c_s]
+    if extra_bcs is not None:
+        bcs.extend(extra_bcs)
     
     # Add Experimental Data (Voltage)
     if X_train is not None and Y_train is not None:
@@ -144,9 +146,23 @@ def build_pinn_model(X_train=None, Y_train=None, large=False):
     
     # Define DeepXDE Network (FNN)
     if large:
-        net = dde.nn.FNN([4] + [128, 128, 128, 128] + [5], "swish", "Glorot normal")
+        # Large model with Strategy 1 and Strategy 2
+        net = dde.nn.FNN([12] + [128, 128, 128, 128] + [5], "swish", "Glorot normal")
     else:
-        net = dde.nn.FNN([4] + [32, 32] + [5], "swish", "Glorot normal")
+        # Small model with Strategy 1 and Strategy 2
+        net = dde.nn.FNN([12] + [32, 32] + [5], "swish", "Glorot normal")
+        
+    # Strategy 1: Fourier Features for input coordinates (applied uniformly)
+    def feature_transform(x):
+        return torch.cat([x, torch.sin(np.pi * x), torch.cos(np.pi * x)], dim=1)
+    net.apply_feature_transform(feature_transform)
+    
+    # Strategy 2: Hard-constrain the Initial Condition (c_s = 0.5 at t=0) (applied uniformly)
+    def output_transform(x, y):
+        t = x[:, 3:4]
+        c_s_new = 0.5 + t * y[:, 0:1]
+        return torch.cat([c_s_new, y[:, 1:]], dim=1)
+    net.apply_output_transform(output_transform)
     
     model = dde.Model(data, net)
     return model, spme
