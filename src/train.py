@@ -37,28 +37,10 @@ except ImportError:
 
 @contextmanager
 def suppress_builtin_print():
-    """Temporarily replaces Python's built-in print to silence DeepXDE's hardcoded prints and reformat L-BFGS steps in Rich."""
+    """Temporarily replaces Python's built-in print to silence DeepXDE's hardcoded prints."""
     original_print = builtins.print
     def _smart_print(*args, **kwargs):
-        if not args:
-            return
-        msg = str(args[0])
-        # DeepXDE prints steps like: "11000     [6.23e-01, 9.03e-04, 2.02e-02, 6.60e-01] ..."
-        # Check if the string starts with a number (the step)
-        parts = msg.split()
-        if len(parts) >= 2 and parts[0].isdigit() and parts[1].startswith("["):
-            step = parts[0]
-            try:
-                # Parse the bracketed string for train losses
-                loss_str_part = msg[msg.find("[")+1:msg.find("]")]
-                losses = [float(x.strip()) for x in loss_str_part.split(",")]
-                labels = ["PDE Solid", "PDE Elec", "Kinetics", "BC Left", "IC c_s", "Voltage Data"]
-                # Only zip up to the number of available labels/losses
-                rich_str = " | ".join([f"[cyan]{lbl}:[/cyan] {val:.2e}" for lbl, val in zip(labels, losses)])
-                console.print(f"[bold yellow]Step {step}[/bold yellow] | {rich_str}")
-            except Exception:
-                pass # Silently drop if parsing fails
-        # Otherwise, silently drop (suppress)
+        pass # Silently drop DeepXDE's raw prints, RichLossCallback will handle formatting
     builtins.print = _smart_print
     try:
         yield
@@ -76,7 +58,12 @@ class RichLossCallback(Callback):
         step = self.model.train_state.step
         if step % self.display_every == 0:
             loss_train = self.model.train_state.loss_train
-            labels = ["PDE Solid", "PDE Elec", "Kinetics", "BC Left", "IC c_s", "Voltage Data"]
+            if len(loss_train) == 5:
+                labels = ["PDE Solid", "PDE Elec", "Kinetics", "BC Left", "Voltage Data"]
+            elif len(loss_train) == 6:
+                labels = ["PDE Solid", "PDE Elec", "Kinetics", "BC Left", "IC c_s", "Voltage Data"]
+            else:
+                labels = [f"Loss {i}" for i in range(len(loss_train))]
             # Formatting them beautifully
             loss_str = " | ".join([f"[cyan]{lbl}:[/cyan] {val:.2e}" for lbl, val in zip(labels, loss_train)])
             console.print(f"[bold yellow]Step {step}[/bold yellow] | {loss_str}")
@@ -92,11 +79,11 @@ def train(epochs, learning_rate, plot_loss, skip_large):
     logger.info(f"Loaded empirical training data with {len(X_train)} points." if X_train is not None else "No empirical data loaded.")
 
     def train_model(model, spme, name, cb):
-        # Weights: [PDE Solid, PDE Elec, Kinetics, BC Left, IC c_s, Voltage Data (if present)]
-        num_losses = len(model.data.bcs) + 3 # 3 PDEs + BCs
-        loss_weights = [1.0, 1.0, 1e-4, 50.0, 50.0]
-        if num_losses > 5:
+        # Weights: [PDE Solid, PDE Elec, Kinetics, BC Left, Voltage Data (if present)]
+        loss_weights = [1.0, 1.0, 1e-4, 50.0]
+        if len(model.data.bcs) > 1:
             loss_weights.append(100.0) # High weight for actual voltage data
+            
         model.compile("adam", lr=learning_rate, decay=("step", 2000, 0.4), loss_weights=loss_weights)
 
         logger.info(f"Starting DeepXDE PINN optimization (Stage 1: Adam) for {name} model...")
@@ -144,7 +131,8 @@ def train(epochs, learning_rate, plot_loss, skip_large):
 
     # 7. Plot Loss if requested
     if plot_loss:
-        labels = ["PDE Solid", "PDE Elec", "Kinetics", "BC Left", "IC c_s", "Voltage Data"]
+        labels = ["PDE Solid", "PDE Elec", "Kinetics", "BC Left", "Voltage Data"]
+
         loss_train_small = np.array(history_small.loss_train)
         has_test_small = hasattr(history_small, "loss_test") and len(history_small.loss_test) > 0
         if has_test_small:
@@ -160,11 +148,12 @@ def train(epochs, learning_rate, plot_loss, skip_large):
         fig, axs = plt.subplots(num_plots, 1, figsize=(10, 3 * num_plots), sharex=False)
 
         for i, label in enumerate(labels):
-            axs[i].plot(history_small.steps, loss_train_small[:, i], label="Train (Small)", color="blue")
-            if has_test_small:
-                axs[i].plot(history_small.steps, loss_test_small[:, i], label="Validation (Small)", color="lightblue", linestyle="--")
+            if i < loss_train_small.shape[1]:
+                axs[i].plot(history_small.steps, loss_train_small[:, i], label="Train (Small)", color="blue")
+                if has_test_small:
+                    axs[i].plot(history_small.steps, loss_test_small[:, i], label="Validation (Small)", color="lightblue", linestyle="--")
 
-            if not skip_large:
+            if not skip_large and i < loss_train_large.shape[1]:
                 axs[i].plot(history_large.steps, loss_train_large[:, i], label="Train (Large)", color="green")
                 if has_test_large:
                     axs[i].plot(history_large.steps, loss_test_large[:, i], label="Validation (Large)", color="lightgreen", linestyle="--")

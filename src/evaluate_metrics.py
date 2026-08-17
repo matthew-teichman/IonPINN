@@ -288,6 +288,10 @@ def main():
     if load_model_weights(model_large, "ionpinn_foundation_large.pt", device, console):
         models["Large"] = model_large
         
+    model_distilled, _ = build_pinn_model(large=False)
+    if load_model_weights(model_distilled, "ionpinn_distilled_small.pt", device, console):
+        models["Distilled"] = model_distilled
+        
     if not models:
         console.print("[bold red]No models could be loaded. Exiting.[/bold red]")
         return
